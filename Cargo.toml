@@ -1,0 +1,12 @@
+[package]
+name = "wireguard-reverse-proxy"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.75"
+base64 = "0.21.4"
+boringtun = "0.6.0"
+hashbrown = "0.14.0"
+smoltcp = "0.10.0"
+tokio = { version = "1.32.0", features = ["rt",  "macros", "net", "time", "io-util", "sync"] }
