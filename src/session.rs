@@ -108,6 +108,8 @@ impl Session<'_> {
             let Ok(mut tcp_stream) = TcpStream::connect(target_addr).await else {
                 // virtual_tcp_socket_async.close();
                 println!("failed to connect to tcp end...");
+
+                virtual_tcp_socket_async.close().await;
                 return;
             };
 

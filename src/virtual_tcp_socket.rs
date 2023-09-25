@@ -1,6 +1,6 @@
 use std::io::{self, Error};
 
-use smoltcp::socket::tcp::{Socket, SendError};
+use smoltcp::socket::tcp::{SendError, Socket};
 
 pub struct VirtualTcpSocket {}
 
@@ -8,14 +8,14 @@ pub struct VirtualTcpSocketSyncSide {
     reciever: tokio::sync::mpsc::Receiver<Vec<u8>>,
     sender: tokio::sync::mpsc::Sender<Vec<u8>>,
 
-    //close_virtual_sender: tokio::sync::oneshot::Sender<()>,
+    close_virtual_receiver: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub struct VirtualTcpSocketAsyncSide {
     reciever: tokio::sync::mpsc::Receiver<Vec<u8>>,
     sender: tokio::sync::mpsc::Sender<Vec<u8>>,
 
-    // close_virtual_receiver: tokio::sync::oneshot::Sender<()>,
+    close_virtual_sender: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl VirtualTcpSocket {
@@ -23,16 +23,18 @@ impl VirtualTcpSocket {
         let (a_sender, a_receiver) = tokio::sync::mpsc::channel(8);
         let (b_sender, b_receiver) = tokio::sync::mpsc::channel(8);
 
-        //let (close_virtual_sender, close_virtual_receiver) = tokio::sync::oneshot::channel();
+        let (close_virtual_sender, close_virtual_receiver) = tokio::sync::oneshot::channel();
 
         (
             VirtualTcpSocketSyncSide {
                 reciever: b_receiver,
                 sender: a_sender,
+                close_virtual_receiver,
             },
             VirtualTcpSocketAsyncSide {
                 reciever: a_receiver,
                 sender: b_sender,
+                close_virtual_sender: Some(close_virtual_sender)
             },
         )
     }
@@ -43,20 +45,25 @@ impl VirtualTcpSocketAsyncSide {
         match self.reciever.recv().await {
             Some(received) => {
                 if buf.len() < received.len() {
-                    return Err(Error::new(io::ErrorKind::Other, "buffer is too small"))
+                    return Err(Error::new(io::ErrorKind::Other, "buffer is too small"));
                 }
 
                 buf[0..received.len()].clone_from_slice(&received);
 
                 return Ok(received.len());
-            },
-            None => return Err(Error::new(io::ErrorKind::BrokenPipe, "the connection was closed")),
+            }
+            None => {
+                return Err(Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the connection was closed",
+                ))
+            }
         }
     }
 
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Err(e) = self.sender.send(buf.to_vec()).await {
-            return Err(Error::new(io::ErrorKind::Other, e))
+            return Err(Error::new(io::ErrorKind::Other, e));
         }
 
         Ok(buf.len())
@@ -71,16 +78,25 @@ impl VirtualTcpSocketAsyncSide {
             match self.write(&mut buf[done..]).await {
                 Ok(size) => {
                     done += size;
-                },
+                }
                 Err(e) => return Err(e),
             }
         }
+    }
 
+    pub async fn close(&mut self) {
+        if let Some(close_virtual_sender) = self.close_virtual_sender.take() {
+            let _ = close_virtual_sender.send(());
+        }
     }
 }
 
 impl VirtualTcpSocketSyncSide {
     pub fn process(&mut self, socket: &mut Socket<'_>) {
+        if let Ok(_) = self.close_virtual_receiver.try_recv() {
+            socket.close();
+        }
+
         if socket.can_recv() {
             // let receive_amount = socket.recv_capacity() - socket.recv_queue();
 
@@ -90,20 +106,18 @@ impl VirtualTcpSocketSyncSide {
                 Ok(received) => {
                     // TODO: can be optimized
                     match self.sender.try_send(buf[..received].into()) {
-                        Ok(_) => {
-
-                        },
+                        Ok(_) => {}
                         Err(e) => {
                             match e {
                                 tokio::sync::mpsc::error::TrySendError::Full(_) => {
                                     // maybe we should use peek_slice and check weather we have enough
                                     todo!()
-                                },
+                                }
                                 tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                                     socket.close();
-                                },
+                                }
                             }
-                        },
+                        }
                     }
                 }
                 Err(_) => todo!(),
@@ -121,14 +135,15 @@ impl VirtualTcpSocketSyncSide {
                     Ok(buffer) => {
                         match socket.send_slice(&buffer[..]) {
                             Ok(sent) => {
-                                assert!(sent == buffer.len())                                
-                            },
+                                assert!(sent == buffer.len())
+                            }
                             Err(e) if e == SendError::InvalidState => todo!(),
-                            Err(_) => todo!()
-                        }; },
-                    Err(e) if e == tokio::sync::mpsc::error::TryRecvError::Empty => {  },
-                    Err(e) if e == tokio::sync::mpsc::error::TryRecvError::Disconnected => {  },
-                    Err(_) => todo!()
+                            Err(_) => todo!(),
+                        };
+                    }
+                    Err(e) if e == tokio::sync::mpsc::error::TryRecvError::Empty => {}
+                    Err(e) if e == tokio::sync::mpsc::error::TryRecvError::Disconnected => {}
+                    Err(_) => todo!(),
                 };
             }
         }
